@@ -1,0 +1,27 @@
+/* container page */
+.toolbar h1 .container-name { margin-left: 6px; overflow-wrap: anywhere; }
+.toolbar h1 .state { font-size: 13px; font-weight: normal; color: var(--muted); }
+.facts { margin: -8px 0 16px; font-size: 12px; }
+table.kv-table th { background: none; position: static; width: 180px; color: var(--muted); font-size: 12px; font-weight: 500; white-space: nowrap; vertical-align: top; }
+table.kv-table td { overflow-wrap: anywhere; }
+.verdict { margin-top: 4px; font-size: 12px; } .verdict.ok { color: var(--ok); } .verdict.warn { color: var(--warn); } .verdict.bad { color: var(--bad); } .verdict.muted { color: var(--muted); }
+.restart-form { margin: 0; gap: 8px; }
+.restart-form input.retries { width: 80px; }
+.restart-hint { flex-basis: 100%; }
+.env-value { overflow-wrap: anywhere; word-break: break-all; }
+table.fixed-cols { table-layout: fixed; }
+col.env-name-col { width: 34%; }
+button.link.reveal { white-space: normal; text-align: left; color: inherit; }
+pre.inline-out { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; color: var(--muted); max-height: 120px; overflow: auto; }
+.net-connect { margin: 0 0 12px; }
+.net-connect input { width: 340px; }
+@media (max-width: 800px) {
+  .net-connect input { width: 100%; }
+  table.kv-table th { width: 110px; white-space: normal; }
+}
+/* a job's state in the title: its own line on a phone, so the container's name keeps the width */
+.toolbar h1 .job-mark { font-size: 13px; font-weight: normal; margin-left: 0; }
+@media (max-width: 800px) {
+  .toolbar h1:has(.job-mark) { flex-wrap: wrap; }
+  .toolbar h1 .job-mark { flex-basis: 100%; }
+}

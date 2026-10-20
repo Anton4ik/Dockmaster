@@ -1,0 +1,87 @@
+/* The shell (side menu and page), the rows pages are built from, and the sign-in box. */
+.shell { display: flex; min-height: 100vh; }
+.sidebar { width: 220px; background: var(--panel); border-right: 1px solid var(--border); padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; height: 100vh; flex-shrink: 0; transition: width .15s ease; }
+.sidebar .brand { display: flex; align-items: center; font-size: 18px; font-weight: 700; padding: 6px 10px 16px; white-space: nowrap; }
+.sidebar .logo { margin-right: 6px; }
+.sidebar a { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; color: var(--text); white-space: nowrap; }
+.sidebar a:hover { background: var(--panel2); }
+.sidebar a.active { background: var(--accent); color: white; }
+.sidebar .nav-icon { flex-shrink: 0; opacity: .85; }
+.sidebar .section { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 16px 10px 6px; }
+.sidebar a.agent .dot { margin: 0 4px 0 5px; }
+.sidebar .initials { display: none; }
+/* collapse / expand: a quiet icon button at the very bottom, away from everything else */
+/* the signed-in user, at the bottom above the fold button */
+.sidebar .no-servers { padding: 4px 10px; white-space: normal; }
+.sidebar .collapse { margin-top: auto; align-self: flex-end; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; background: none; border: 1px solid transparent; border-radius: 6px; color: var(--muted); }
+.sidebar .collapse:hover { color: var(--text); background: var(--panel2); border-color: var(--border); }
+.sidebar.mini { width: 60px; padding: 16px 8px; }
+.sidebar.mini .label { display: none; }
+.sidebar.mini .brand { justify-content: center; padding: 6px 0 12px; }
+.sidebar.mini .logo { margin: 0; }
+.sidebar.mini a { justify-content: center; padding: 8px 0; }
+.sidebar.mini .collapse { align-self: center; }
+.sidebar.mini .section { padding: 0; border-top: 1px solid var(--border); margin: 10px 4px 8px; }
+.sidebar.mini a.agent { flex-direction: column; gap: 3px; font-size: 11px; font-weight: 600; }
+.sidebar.mini a.agent .dot { margin: 0; }
+.sidebar.mini .initials { display: block; }
+.content { flex: 1; padding: 24px 32px; min-width: 0; }
+@media (max-width: 1100px) {
+  .sidebar { width: 180px; }
+  .content { padding: 20px; }
+}
+/* a phone: the menu becomes one bar across the top, swiped sideways when it does not fit (wrapped, it took a third
+   of the screen) */
+@media (max-width: 800px) {
+  .shell { flex-direction: column; }
+  .sidebar { width: auto; height: auto; position: sticky; top: 0; z-index: 10; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 4px; padding: 8px 12px; border-right: none; border-bottom: 1px solid var(--border);
+    overflow-x: auto; scrollbar-width: none; }
+  .sidebar::-webkit-scrollbar { display: none; }
+  .sidebar > * { flex-shrink: 0; }
+  .sidebar .brand { padding: 4px 8px; font-size: 16px; }
+  .sidebar a { padding: 6px 10px; }
+  .sidebar .section { padding: 6px 8px; font-size: 10px; }
+  .sidebar .collapse, .sidebar.mini .initials, .sidebar .no-servers { display: none; }
+  .sidebar.mini { width: auto; padding: 8px 12px; }
+  .sidebar.mini .label { display: inline; }
+  .sidebar.mini .brand { padding: 4px 8px; }
+  .sidebar.mini a, .sidebar.mini a.agent { flex-direction: row; padding: 6px 10px; font-size: inherit; font-weight: inherit; }
+  .sidebar.mini .section { border-top: none; margin: 0; padding: 6px 8px; }
+  .content { padding: 16px; }
+}
+
+/* rows of a page */
+.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.toolbar .spacer, .toolbar .push-right { margin-left: auto; }
+.toolbar h1 { margin: 0; display: inline-flex; align-items: center; gap: 8px; }
+.toolbar h1 a { color: inherit; }
+/* project page: "server / name"; the name may be long, the server stays readable */
+.toolbar h1 .project-name { overflow-wrap: anywhere; }
+.toolbar h1 .project-more-hosts { font-size: 13px; font-weight: normal; margin-left: -4px; }
+.host-facts { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* the host's size is what matters when deciding where a service goes */
+.resource { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 7px; font-size: 12px; white-space: nowrap; }
+.form { max-width: 640px; }
+.grid2 .form { max-width: none; }
+.row { display: flex; gap: 12px; } .row > * { flex: 1; min-width: 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.filters { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 20px 0 10px; }
+.filters h2 { margin: 0; }
+.filters input[type=search] { width: 260px; }
+.filters label { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; }
+.login { max-width: 360px; margin: 12vh auto; padding: 0 16px; }
+.login .card { padding: 28px; }
+.narrow { max-width: 200px; }
+.form-actions { margin-top: 16px; }
+.form-actions.flush { margin-bottom: 0; }
+/* rows of 4px: each card spans as many as it is tall (components/Masonry), so the columns pack without gaps */
+.masonry { display: grid; grid-auto-rows: 4px; column-gap: 16px; align-items: start; }
+.settings-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr)); }
+.settings-grid > .card, .settings-grid > .card.spaced { margin: 0; max-width: none; }
+@media (max-width: 800px) {
+  .grid2 { grid-template-columns: 1fr; }
+  .row { flex-direction: column; gap: 0; }
+  .row > * { max-width: none !important; }
+  .filters input[type=search] { width: 100%; }
+}

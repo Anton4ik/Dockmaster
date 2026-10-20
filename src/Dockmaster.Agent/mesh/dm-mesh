@@ -1,0 +1,511 @@
+#!/bin/sh
+# dm-mesh: the WireGuard interface (dm0) between Dockmaster agent hosts.
+#
+# Runs inside the "dockmaster-mesh" sidecar container the agent creates from its own image, in the HOST network
+# namespace with NET_ADMIN, so everything below touches the host: the dm0 interface, its route and a few iptables
+# rules. Other WireGuard interfaces on the host are never touched. State lives in $DM_MESH_DIR (bind-mounted from
+# the host):
+#   private.key, public.key  the host's WireGuard keys (keygen)
+#   dm0.conf                 `wg setconf` format (written by the agent)
+#   dm0.env                  address, subnet, port, hub flag, MTU, config hash, TCP tuning flag (written by the agent)
+#   dm0.fwd                  a hub's forwarding groups, one "name<TAB>ip,ip,…" line per network (written by the agent)
+#   dm0.routes               peers on this LAN of a trusted network, one "meshIp lanIp" line each: plain routes, no
+#                            tunnel (written by the agent)
+#   dm0.haproxy.cfg          balancers for services whose replicas run on other hosts (written by the agent; empty
+#                            = none)
+#   haproxy.err              why the balancers are not running, when they are not
+#   haproxy.refused          checksum of a balancer config HAProxy refused: not tried again until it changes
+#   peers.txt                mesh ips to ping for the status (written by the agent)
+#   backend                  "kernel" or "wireguard-go": what brought dm0 up
+#   sysctl.orig              host sysctls `up` changed, which `down` puts back
+#   wireguard-go.log         what wireguard-go says (its errors), kept small by `run`
+#
+# Output of `probe`, `status` and `pmtu` is line based ("key value"), parsed by the agent (MeshConfig.cs).
+set -u
+
+DIR=${DM_MESH_DIR:-/var/lib/dockmaster/mesh}
+IF=dm0
+PRIVATE_KEY=$DIR/private.key
+PUBLIC_KEY=$DIR/public.key
+CONF=$DIR/$IF.conf
+ENVF=$DIR/$IF.env
+FWDF=$DIR/$IF.fwd
+PEERS=$DIR/peers.txt
+BACKENDF=$DIR/backend
+SYSCTL_ORIG=$DIR/sysctl.orig
+WGGO_LOG=$DIR/wireguard-go.log
+WGGO_LOG_MAX=1048576
+FWD_CHAIN=DM-FWD
+ROUTESF=$DIR/$IF.routes
+# marks the routes dm-mesh adds, so the stale ones are found and removed
+ROUTE_PROTO=77
+LAN_NAT_CHAIN=DM-LAN-NAT
+LAN_IN_CHAIN=DM-LAN-IN
+HAPROXY_CFG=$DIR/$IF.haproxy.cfg
+HAPROXY_ERR=$DIR/haproxy.err
+HAPROXY_REFUSED=$DIR/haproxy.refused
+# in the sidecar's own filesystem: a new sidecar starts without a stale one
+HAPROXY_PID=/var/run/dm-haproxy.pid
+LB_IN_CHAIN=DM-LB-IN
+DEFAULT_MTU=1420
+BENCH_PORT=51822
+# the IP packet sizes `pmtu` searches between: below 1280 nothing sensible carries IPv4 tunnels, 1500 is Ethernet
+PMTU_MIN=1280
+PMTU_MAX=1500
+# the host sysctls TCP tuning sets (TUNE=1 in dm0.env) and puts back (TUNE=0)
+TUNE_KEYS="net.core.default_qdisc net.ipv4.tcp_congestion_control net.core.rmem_max net.core.wmem_max net.ipv4.tcp_rmem net.ipv4.tcp_wmem"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+# every call into WireGuard is bounded: a wireguard-go that stopped answering its control socket must not leave a
+# `wg` behind for each apply, and the caller gets a reason instead of its own timeout
+WG_TIMEOUT=15
+wgc() { timeout "$WG_TIMEOUT" wg "$@"; }
+NOT_ANSWERING="wireguard-go does not answer (hung or crashed, see wireguard-go.log in the mesh directory)"
+
+# returns 1 when a value is missing (${X:?} would exit the whole script, also where the caller tolerates a failure)
+load_env() {
+  [ -f "$ENVF" ] || return 1
+  . "$ENVF"
+  [ -n "${ADDRESS:-}" ] && [ -n "${SUBNET:-}" ] && [ -n "${PORT:-}" ]
+}
+
+# ---------- iptables: use the backend Docker uses, so our rules land in the same tables ----------
+IPT=
+ipt() {
+  if [ -z "$IPT" ]; then
+    if iptables-nft -t nat -S DOCKER >/dev/null 2>&1; then IPT=iptables-nft
+    elif iptables-legacy -t nat -S DOCKER >/dev/null 2>&1; then IPT=iptables-legacy
+    else IPT=iptables; fi
+  fi
+  "$IPT" "$@"
+}
+# add a rule once, at the end of its chain: rule <table> <chain> <rule...>
+rule() { local t=$1; shift; ipt -t "$t" -C "$@" 2>/dev/null || ipt -t "$t" -A "$@"; }
+# add a rule once, at the top of its chain: insert <table> <chain> <rule...>
+insert() { local t=$1 chain=$2; shift 2; ipt -t "$t" -C "$chain" "$@" 2>/dev/null || ipt -t "$t" -I "$chain" 1 "$@"; }
+# remove every copy of a rule: unrule <table> <chain> <rule...>
+unrule() { local t=$1; shift; while ipt -t "$t" -C "$@" 2>/dev/null; do ipt -t "$t" -D "$@" || break; done; }
+
+# every rule we own, in one place (used by rules/unrules)
+each_rule() {
+  # containers on docker bridges leave the tunnel with the host's mesh ip: the far side only accepts packets whose
+  # source is in the sender's AllowedIPs (cryptokey routing)
+  "$1" nat POSTROUTING ! -s "$SUBNET" -o "$IF" -j MASQUERADE
+  "$1" filter FORWARD -o "$IF" -j ACCEPT
+  "$1" filter FORWARD -i "$IF" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  # a smaller MTU inside the tunnel: clamp MSS so TCP through the tunnel never black-holes
+  "$1" mangle FORWARD -o "$IF" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+  "$1" mangle FORWARD -i "$IF" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+}
+
+# Traffic in through dm0 and out through dm0 (a hub relaying between peers behind NAT) passes only between addresses of
+# one network (dm0.fwd), everything else is dropped — on every host, so no peer can use another as a bridge into a
+# network it is not in.
+fwd_rules() {
+  local tab _name ips
+  unrule filter FORWARD -i "$IF" -o "$IF" -j ACCEPT   # the single rule of the time before networks
+  ipt -N "$FWD_CHAIN" 2>/dev/null || true
+  ipt -F "$FWD_CHAIN"
+  if [ "${HUB:-0}" = 1 ] && [ -s "$FWDF" ]; then
+    tab=$(printf '\t')
+    while IFS="$tab" read -r _name ips; do
+      [ -n "$ips" ] && ipt -A "$FWD_CHAIN" -s "$ips" -d "$ips" -j ACCEPT
+    done < "$FWDF"
+  fi
+  ipt -A "$FWD_CHAIN" -j DROP
+  insert filter FORWARD -i "$IF" -o "$IF" -j "$FWD_CHAIN"
+}
+fwd_unrules() {
+  unrule filter FORWARD -i "$IF" -o "$IF" -j "$FWD_CHAIN"
+  unrule filter FORWARD -i "$IF" -o "$IF" -j ACCEPT
+  ipt -F "$FWD_CHAIN" 2>/dev/null || true
+  ipt -X "$FWD_CHAIN" 2>/dev/null || true
+}
+# host firewalls (ufw, firewalld) drop by default: the WireGuard port and what arrives through the tunnel must get in.
+# Inserted at the top of INPUT, so they come before the firewall's own chains.
+each_input_rule() {
+  "$1" filter INPUT -p udp --dport "$PORT" -j ACCEPT
+  "$1" filter INPUT -i "$IF" -j ACCEPT
+}
+# Peers of a trusted network on this LAN (dm0.routes): their mesh address is routed through their LAN address, outside
+# the tunnel and unencrypted. What leaves for them (containers too) carries this host's mesh address, and what they
+# send is let in, as through dm0.
+lan_routes() {
+  local own ip via want=" "
+  # none (the usual case): nothing of this left behind, not even empty chains
+  if [ ! -s "$ROUTESF" ]; then lan_unroutes; return 0; fi
+  own=${ADDRESS%/*}
+  ipt -t nat -N "$LAN_NAT_CHAIN" 2>/dev/null || true
+  ipt -t nat -F "$LAN_NAT_CHAIN"
+  ipt -N "$LAN_IN_CHAIN" 2>/dev/null || true
+  ipt -F "$LAN_IN_CHAIN"
+  while read -r ip via; do
+    [ -n "$ip" ] && [ -n "$via" ] || continue
+    if ! ip -4 route replace "$ip/32" via "$via" src "$own" proto "$ROUTE_PROTO"; then
+      echo "warning: cannot route $ip through $via" >&2
+      continue
+    fi
+    want="$want$ip "
+    ipt -t nat -A "$LAN_NAT_CHAIN" -d "$ip/32" -j SNAT --to-source "$own"
+    ipt -A "$LAN_IN_CHAIN" -s "$ip/32" -d "$own/32" -j ACCEPT
+  done < "$ROUTESF"
+  # peers that are no longer plain: back to the tunnel (the route to the subnet through dm0)
+  ip -4 route show proto "$ROUTE_PROTO" | awk '{print $1}' | while read -r r; do
+    case "$want" in *" ${r%/32} "*) ;; *) ip -4 route del "$r" proto "$ROUTE_PROTO" 2>/dev/null;; esac
+  done
+  insert nat POSTROUTING -j "$LAN_NAT_CHAIN"
+  insert filter INPUT -j "$LAN_IN_CHAIN"
+}
+lan_unroutes() {
+  local r
+  for r in $(ip -4 route show proto "$ROUTE_PROTO" | awk '{print $1}'); do ip -4 route del "$r" proto "$ROUTE_PROTO" 2>/dev/null; done
+  unrule nat POSTROUTING -j "$LAN_NAT_CHAIN"
+  ipt -t nat -F "$LAN_NAT_CHAIN" 2>/dev/null; ipt -t nat -X "$LAN_NAT_CHAIN" 2>/dev/null
+  unrule filter INPUT -j "$LAN_IN_CHAIN"
+  ipt -F "$LAN_IN_CHAIN" 2>/dev/null; ipt -X "$LAN_IN_CHAIN" 2>/dev/null
+  return 0
+}
+
+# Balancers (dm0.haproxy.cfg): a service with replicas on other hosts, reached on this host's mesh address and spread
+# over those replicas. Started, reloaded (the old process finishes its connections), or stopped when there are none.
+haproxy_running() { [ -s "$HAPROXY_PID" ] && kill -0 "$(head -n 1 "$HAPROXY_PID")" 2>/dev/null; }
+balancer() {
+  local own port
+  if [ ! -s "$HAPROXY_CFG" ]; then balancer_stop; return 0; fi
+  own=${ADDRESS%/*}
+  # the containers here reach a balancer on the host's own mesh address: let that in ahead of a host firewall
+  ipt -N "$LB_IN_CHAIN" 2>/dev/null || true
+  ipt -F "$LB_IN_CHAIN"
+  for port in $(awk '$1 == "bind" { n = split($2, a, ":"); print a[n] }' "$HAPROXY_CFG" | sort -u); do
+    ipt -A "$LB_IN_CHAIN" -d "$own/32" -p tcp --dport "$port" -j ACCEPT
+  done
+  insert filter INPUT -j "$LB_IN_CHAIN"
+  if ! haproxy -c -f "$HAPROXY_CFG" > "$HAPROXY_ERR.check" 2>&1; then
+    grep ALERT "$HAPROXY_ERR.check" | head -n 1 | sed 's/^\[ALERT\] *([0-9]*) *: *//' > "$HAPROXY_ERR"
+    rm -f "$HAPROXY_ERR.check"
+    cksum < "$HAPROXY_CFG" > "$HAPROXY_REFUSED"
+    echo "warning: balancer config refused: $(cat "$HAPROXY_ERR")" >&2
+    return 0
+  fi
+  rm -f "$HAPROXY_ERR.check" "$HAPROXY_REFUSED"
+  # like wireguard-go: the daemon must not keep the caller's output (a docker exec would not end)
+  if haproxy_running; then
+    haproxy -D -p "$HAPROXY_PID" -f "$HAPROXY_CFG" -sf $(cat "$HAPROXY_PID") </dev/null >/dev/null 2>"$HAPROXY_ERR"
+  else
+    haproxy -D -p "$HAPROXY_PID" -f "$HAPROXY_CFG" </dev/null >/dev/null 2>"$HAPROXY_ERR"
+  fi || echo "warning: balancer did not start: $(tail -n 1 "$HAPROXY_ERR")" >&2
+}
+balancer_stop() {
+  if haproxy_running; then kill $(cat "$HAPROXY_PID") 2>/dev/null; fi
+  rm -f "$HAPROXY_PID" "$HAPROXY_ERR" "$HAPROXY_REFUSED"
+  unrule filter INPUT -j "$LB_IN_CHAIN"
+  ipt -F "$LB_IN_CHAIN" 2>/dev/null; ipt -X "$LB_IN_CHAIN" 2>/dev/null
+  return 0
+}
+
+rules() { each_rule rule; each_input_rule insert; fwd_rules; lan_routes; }
+unrules() { each_rule unrule; [ -n "${PORT:-}" ] && each_input_rule unrule; fwd_unrules; lan_unroutes; balancer_stop; }
+
+# best effort: /proc/sys is read-only unless the sidecar runs with systempaths=unconfined
+# skipped when already set (a hub on a docker host has ip_forward=1 anyway), so a read-only /proc/sys is only a
+# problem when it matters
+# `sysctl_w key=value quiet`: no problem line on failure, the caller says what it means; returns 1 when not set
+sysctl_w() {
+  local key old
+  key=${1%%=*}
+  # multi-value keys (tcp_rmem) read back with tabs: compared with the spaces they are written with
+  old=$(sysctl -n "$key" 2>/dev/null | tr '\t' ' ')
+  [ "$old" = "${1#*=}" ] && return 0
+  if sysctl -w "$1" >/dev/null 2>&1; then
+    # remember what the host had, `down` puts it back
+    grep -q "^$key=" "$SYSCTL_ORIG" 2>/dev/null || echo "$key=$old" >> "$SYSCTL_ORIG"
+  else
+    [ "${2:-}" = quiet ] || echo "problem cannot set $1 (/proc/sys is read-only in the sidecar)"
+    return 1
+  fi
+}
+sysctl_restore() {
+  local kv
+  [ -f "$SYSCTL_ORIG" ] || return 0
+  while IFS= read -r kv; do [ -n "$kv" ] && sysctl -w "$kv" >/dev/null 2>&1; done < "$SYSCTL_ORIG"
+  rm -f "$SYSCTL_ORIG"
+}
+
+# TCP over long paths (a VPS far away, a lossy link): BBR keeps the throughput up where CUBIC backs off on every lost
+# packet, and bigger socket buffers let one connection fill a fast long path. Host-wide: every connection of the host
+# gets it, in and out of the tunnel. Off: what the host had comes back (only these keys, the rest of sysctl.orig stays)
+#
+# BBR is usually a module that is not loaded yet, so it is not in tcp_available_congestion_control, and a container
+# cannot modprobe (no /lib/modules). Writing the sysctl is what loads it: the kernel autoloads tcp_<name> for a
+# process with CAP_NET_ADMIN, which the sidecar has. A kernel built without it refuses the write; `status` reports
+# the congestion control in use, and the server tells the person.
+tune_host() {
+  if [ "${TUNE:-0}" != 1 ]; then tune_restore; return 0; fi
+  if sysctl_w net.ipv4.tcp_congestion_control=bbr quiet; then
+    # pacing for BBR on interfaces made from now on (since 4.13 BBR paces by itself without it)
+    sysctl_w net.core.default_qdisc=fq quiet
+  else
+    echo "warning: no BBR in this kernel (module tcp_bbr): buffers set, congestion control left as it is" >&2
+  fi
+  sysctl_w net.core.rmem_max=16777216
+  sysctl_w net.core.wmem_max=16777216
+  sysctl_w "net.ipv4.tcp_rmem=4096 131072 16777216"
+  sysctl_w "net.ipv4.tcp_wmem=4096 131072 16777216"
+}
+tune_restore() {
+  local key kv
+  [ -f "$SYSCTL_ORIG" ] || return 0
+  for key in $TUNE_KEYS; do
+    kv=$(grep "^$key=" "$SYSCTL_ORIG") || continue
+    sysctl -w "$kv" >/dev/null 2>&1
+    grep -v "^$key=" "$SYSCTL_ORIG" > "$SYSCTL_ORIG.new" && mv "$SYSCTL_ORIG.new" "$SYSCTL_ORIG"
+  done
+}
+
+# ---------- host facts ----------
+# IPv4 addresses of the host, without docker bridges / veths / the mesh itself / other tunnels (a LAN is looked for
+# among these: an address of another WireGuard or VPN is not one)
+host_ips() {
+  ip -4 -o addr show scope global 2>/dev/null | awk '{print $2, $4}' | while read -r dev cidr; do
+    case "$dev" in docker*|br-*|veth*|"$IF"|lo|wg*|tun*|tap*|tailscale*|zt*) continue;; esac
+    echo "${cidr%/*}"
+  done
+}
+
+kernel_wg() {
+  ip link show "$IF" >/dev/null 2>&1 && [ "$(cat "$BACKENDF" 2>/dev/null)" = kernel ] && return 0
+  ip link add dmprobe0 type wireguard 2>/dev/null || return 1
+  ip link del dmprobe0 2>/dev/null
+  return 0
+}
+
+# dm0 carries exactly one address: a re-join with a new address (or a leftover) must not keep the old one, which
+# the kernel would otherwise pick as the source of outgoing packets
+set_address() {
+  local a
+  ip -4 addr replace "$ADDRESS" dev "$IF" || return 1
+  for a in $(ip -4 -o addr show dev "$IF" | awk '{print $4}'); do
+    [ "$a" = "$ADDRESS" ] || ip -4 addr del "$a" dev "$IF"
+  done
+}
+
+# what dm0 needs around it on the host: its route, our iptables rules and the sysctls
+apply_host() {
+  ip -4 route replace "$SUBNET" dev "$IF"
+  rules
+  if [ "${HUB:-0}" = 1 ]; then sysctl_w net.ipv4.ip_forward=1; fi
+  # published ports on the mesh ip must bind even when a container starts before dm0 exists (host boot)
+  sysctl_w net.ipv4.ip_nonlocal_bind=1
+  tune_host
+  balancer
+}
+
+stop_wggo() {
+  pkill -f "^wireguard-go $IF\$" 2>/dev/null
+  rm -f "/var/run/wireguard/$IF.sock"
+  ip link del "$IF" 2>/dev/null
+  return 0
+}
+
+# ---------- subcommands ----------
+cmd_probe() {
+  local port subnet own
+  port=${1:?port}; subnet=${2:?subnet}
+  if kernel_wg; then echo "kernel true"; else echo "kernel false"; fi
+  if [ -c /dev/net/tun ]; then echo "tun true"; else echo "tun false"; fi
+  # our own interface may already hold the port (re-join): that is not a conflict
+  own=$(timeout 5 wg show "$IF" listen-port 2>/dev/null || echo 0)
+  if [ "$own" != "$port" ] && [ -n "$(ss -Hlun "sport = :$port" 2>/dev/null)" ]; then echo "port $port busy"; else echo "port $port free"; fi
+  host_ips | sed 's/^/hostip /'
+  # routes and addresses of everything but dm0: the agent checks them against the mesh subnet
+  ip -4 route show 2>/dev/null | grep -v " dev $IF " | sed 's/^/route /'
+  ip -4 -o addr show 2>/dev/null | awk '{print $2, $4}' | grep -v "^$IF " | sed 's/^/addr /'
+}
+
+cmd_keygen() {
+  mkdir -p "$DIR"
+  chmod 700 "$DIR"
+  if [ ! -s "$PRIVATE_KEY" ]; then
+    umask 077
+    wg genkey > "$PRIVATE_KEY" || die "wg genkey failed"
+  fi
+  wg pubkey < "$PRIVATE_KEY" > "$PUBLIC_KEY" || die "wg pubkey failed"
+  cat "$PUBLIC_KEY"
+}
+
+cmd_up() {
+  load_env || die "no $ENVF"
+  [ -s "$CONF" ] || die "no $CONF"
+  if ! ip link show "$IF" >/dev/null 2>&1; then
+    if ip link add "$IF" type wireguard 2>/dev/null; then
+      echo kernel > "$BACKENDF"
+    else
+      [ -c /dev/net/tun ] || die "no WireGuard: the kernel module is not loaded and there is no /dev/net/tun for wireguard-go (in a Proxmox LXC: run 'modprobe wireguard' on the Proxmox host)"
+      mkdir -p /var/run/wireguard
+      rm -f "/var/run/wireguard/$IF.sock"
+      # Daemon mode: wireguard-go starts itself again with WG_PROCESS_FOREGROUND=1 appended to the environment. That
+      # variable must not be set already: Go reads the first of two copies, so every child daemonized again — an
+      # endless chain of processes that burned CPU and never answered `wg`.
+      # LOG_LEVEL makes the daemon keep stdout/stderr: its errors go to a file, never to the caller (a `docker exec`
+      # only ends when every holder of its output has closed it).
+      if ! env -u WG_PROCESS_FOREGROUND LOG_LEVEL=error wireguard-go "$IF" </dev/null >>"$WGGO_LOG" 2>&1; then
+        die "wireguard-go failed: $(tail -n 1 "$WGGO_LOG" 2>/dev/null)"
+      fi
+      echo wireguard-go > "$BACKENDF"
+    fi
+  fi
+  if ! wgc setconf "$IF" "$CONF"; then
+    # a wireguard-go that does not answer only burns CPU: stop it, `run` tries again later
+    if [ "$(cat "$BACKENDF" 2>/dev/null)" = wireguard-go ]; then stop_wggo; die "$NOT_ANSWERING"; fi
+    die "wg setconf failed"
+  fi
+  set_address || die "cannot set $ADDRESS"
+  ip link set "$IF" mtu "${MTU:-$DEFAULT_MTU}" up || die "cannot bring $IF up"
+  apply_host
+  echo "up $IF $ADDRESS ($(cat "$BACKENDF"))"
+}
+
+# new peers / endpoints without dropping the tunnels that already work
+cmd_sync() {
+  if ! ip link show "$IF" >/dev/null 2>&1; then cmd_up; return; fi
+  load_env || die "no $ENVF"
+  wgc syncconf "$IF" "$CONF" || die "wg syncconf failed$([ "$(cat "$BACKENDF" 2>/dev/null)" = wireguard-go ] && echo ": $NOT_ANSWERING")"
+  set_address
+  ip link set "$IF" mtu "${MTU:-$DEFAULT_MTU}" up
+  apply_host
+  echo "synced $IF"
+}
+
+cmd_status() {
+  local tmp ip rtt dump
+  echo "backend $(cat "$BACKENDF" 2>/dev/null || echo none)"
+  if ip link show "$IF" >/dev/null 2>&1; then echo "up true"; else echo "up false"; fi
+  # the kernel module is there to use (loaded since dm0 came up with wireguard-go: a restart of the sidecar switches)
+  if kernel_wg; then echo "kernel true"; else echo "kernel false"; fi
+  # the host's TCP congestion control (bbr after TCP tuning, where the kernel has it)
+  echo "tcp_cc $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+  host_ips | sed 's/^/hostip /'
+  if [ -s "$HAPROXY_CFG" ] && ! haproxy_running; then
+    echo "problem balancer not running: $(tail -n 1 "$HAPROXY_ERR" 2>/dev/null)"
+  fi
+  # the dump's first line starts with the private key: it never leaves the script
+  if dump=$(timeout 5 wg show "$IF" dump 2>/dev/null); then
+    printf '%s\n' "$dump" | awk 'BEGIN{OFS="\t"} NR==1{$1="-"} {print "wg", $0}'
+  elif ip link show "$IF" >/dev/null 2>&1 && [ "$(cat "$BACKENDF" 2>/dev/null)" = wireguard-go ]; then
+    echo "problem $NOT_ANSWERING"
+  fi
+  # one ping per peer, all at once, one second at most
+  if [ -f "$PEERS" ]; then
+    tmp=$(mktemp -d)
+    while read -r ip; do
+      [ -n "$ip" ] || continue
+      ( ping -c1 -W1 "$ip" 2>/dev/null | sed -n 's/.*= [0-9.]*\/\([0-9.]*\)\/.*/\1/p' > "$tmp/$ip" ) &
+    done < "$PEERS"
+    wait
+    while read -r ip; do
+      [ -n "$ip" ] || continue
+      rtt=$(cat "$tmp/$ip" 2>/dev/null)
+      echo "rtt $ip ${rtt:--1}"
+    done < "$PEERS"
+    rm -rf "$tmp"
+  fi
+}
+
+# The largest IP packet the path to a peer carries, found with pings that must not be fragmented (iputils ping):
+# first the full 1500, then a binary search down to 1280. A lost reply is tried once more. 0 when the peer does
+# not answer at all (no handshake yet, or ICMP dropped on the way).
+pmtu_ping() { ping -M do -c1 -W1 -s "$(($2 - 28))" "$1" >/dev/null 2>&1 || ping -M do -c1 -W1 -s "$(($2 - 28))" "$1" >/dev/null 2>&1; }
+pmtu_of() {
+  local host=$1 lo=$PMTU_MIN hi=$PMTU_MAX mid
+  if pmtu_ping "$host" "$hi"; then echo "$hi"; return 0; fi
+  if ! pmtu_ping "$host" "$lo"; then echo 0; return 0; fi
+  while [ $((hi - lo)) -gt 1 ]; do
+    mid=$(((lo + hi) / 2))
+    if pmtu_ping "$host" "$mid"; then lo=$mid; else hi=$mid; fi
+  done
+  echo "$lo"
+}
+
+# "pmtu <public-key> <host> <size>" for every peer WireGuard has an endpoint for (the hosts this one actually sends
+# to: public peers, and after a handshake the NAT address of the others). The tunnel's MTU is the smallest size
+# minus WireGuard's 60 bytes; the agent reports, the server decides. All peers at once, a minute at most.
+cmd_pmtu() {
+  local dump tmp
+  dump=$(timeout 5 wg show "$IF" dump 2>/dev/null) || die "cannot read $IF"
+  tmp=$(mktemp -d)
+  # the loop is a subshell: its background probes are waited for inside it
+  printf '%s\n' "$dump" | awk 'NR>1 && $3 != "(none)" {print $1, $3}' | {
+    n=0
+    while read -r key ep; do
+      host=${ep%:*}
+      case "$host" in *[!0-9.]*|"") continue;; esac   # IPv6 or a name: not measured
+      n=$((n + 1))
+      ( echo "pmtu $key $host $(pmtu_of "$host")" > "$tmp/$n" ) &
+    done
+    wait
+  }
+  cat "$tmp"/* 2>/dev/null
+  rm -rf "$tmp"
+}
+
+cmd_down() {
+  SUBNET=${SUBNET:-0.0.0.0/0}
+  load_env 2>/dev/null || true
+  unrules
+  if [ "$(cat "$BACKENDF" 2>/dev/null)" = wireguard-go ]; then stop_wggo; fi
+  ip link del "$IF" 2>/dev/null || true
+  sysctl_restore
+  rm -f "$BACKENDF"
+  echo "down $IF"
+}
+
+# the sidecar's main process: bring the interface up when there is a config, and back when it disappears
+# (wireguard-go died, someone deleted dm0)
+cmd_run() {
+  trap 'exit 0' TERM INT
+  # a new sidecar (agent updated) finds a kernel dm0 still up: re-apply rules and sysctls it may not have
+  local pause=10
+  # subshells: a failing sync / up exits its own shell, not this loop
+  if [ -f "$ENVF" ] && [ -s "$CONF" ]; then (cmd_sync) || echo "sync failed" >&2; fi
+  while :; do
+    if [ -f "$ENVF" ] && [ -s "$CONF" ] && ! ip link show "$IF" >/dev/null 2>&1; then
+      # failures back off to 5 minutes: a backend that never works is not restarted every 10 seconds
+      if (cmd_up); then pause=10; else
+        echo "up failed, next try in ${pause}s" >&2
+        sleep "$pause" &
+        wait $!
+        pause=$((pause * 2 > 300 ? 300 : pause * 2))
+      fi
+    fi
+    # a balancer that died comes back; a config HAProxy refused waits for a new one
+    if [ -s "$HAPROXY_CFG" ] && ! haproxy_running && [ "$(cksum < "$HAPROXY_CFG")" != "$(cat "$HAPROXY_REFUSED" 2>/dev/null)" ] && load_env; then
+      balancer
+    fi
+    # opened for append, so emptying it under a running wireguard-go is safe
+    if [ -f "$WGGO_LOG" ] && [ "$(wc -c < "$WGGO_LOG")" -gt "$WGGO_LOG_MAX" ]; then : > "$WGGO_LOG"; fi
+    sleep 10 &
+    wait $!
+  done
+}
+
+cmd_bench_server() { exec iperf3 -s -1 -B "${1:?ip}" -p "$BENCH_PORT" -i 0 --forceflush; }
+# -O 1: leave out the first second (TCP slow start over a 30+ ms path otherwise reads as a slow tunnel)
+cmd_bench_client() {
+  [ -z "${3:-}" ] || [ "$3" = -R ] || die "bench-client: only -R"
+  exec iperf3 -c "${1:?ip}" -p "$BENCH_PORT" -t "${2:-5}" -O 1 -J ${3:+"$3"}
+}
+
+case "${1:-}" in
+  probe) shift; cmd_probe "$@";;
+  keygen) cmd_keygen;;
+  up) cmd_up;;
+  sync) cmd_sync;;
+  status) cmd_status;;
+  pmtu) cmd_pmtu;;
+  down) cmd_down;;
+  run) cmd_run;;
+  bench-server) shift; cmd_bench_server "$@";;
+  bench-client) shift; cmd_bench_client "$@";;
+  *) echo "usage: dm-mesh probe PORT SUBNET | keygen | up | sync | status | pmtu | down | run | bench-server IP | bench-client IP SECS [-R]" >&2; exit 2;;
+esac

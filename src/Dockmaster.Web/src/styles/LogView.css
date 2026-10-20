@@ -1,0 +1,31 @@
+/* log viewer */
+.logview { display: flex; flex-direction: column; min-height: 0; background: var(--log-bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.drawer .logview { flex: 1; border: none; border-radius: 0; }
+.logview.page-log { height: calc(100vh - 330px); min-height: 320px; }
+.log-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.log-toolbar input[type=search] { width: 200px; padding: 4px 8px; font-size: 12px; }
+.log-toolbar select.cell { padding: 3px 6px; font-size: 12px; }
+.log-lines { flex: 1; overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 1.5; padding: 6px 0; }
+.log-lines.nowrap .log-line { white-space: pre; }
+.log-lines.wrap .log-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-line { padding: 1px 12px; }
+.log-line.lv-error, .log-line.lv-fatal { background: rgba(239,68,68,.08); }
+.log-line.lv-warn { background: rgba(245,158,11,.06); }
+.log-lines:not(.nowrap) .log-line.lv-debug, .log-line.lv-trace { color: var(--muted); }
+.log-line.expandable { cursor: pointer; }
+.log-line.expandable:hover { background: rgba(255,255,255,.04); }
+.log-time { color: var(--muted); margin-right: 8px; }
+.log-level { display: inline-block; width: 3.4ch; margin-right: 8px; font-weight: 700; }
+.log-level.trace, .log-level.debug { color: var(--muted); }
+.log-level.info { color: var(--accent); }
+.log-level.warn { color: var(--warn); }
+.log-level.error, .log-level.fatal { color: var(--bad); }
+.log-source { color: var(--muted); margin-left: 10px; font-size: 11px; }
+.log-exc { color: var(--bad); margin-left: 10px; font-size: 11px; }
+.log-note { padding: 2px 12px 6px; color: var(--muted); font-style: italic; }
+pre.log-entry { margin: 4px 0 6px 0; padding: 8px 10px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; cursor: text; color: var(--text); font-size: 12px; }
+.log-exc-text { color: var(--bad); }
+@media (max-width: 800px) { .log-toolbar input[type=search] { width: 100%; } .logview.page-log { height: 70vh; } }
+
+/* a shell in a container (xterm.js draws into it) */
+.terminal { height: max(360px, calc(100vh - 360px)); background: #0a0e13; border: 1px solid var(--border); border-radius: 8px; padding: 6px; overflow: hidden; }

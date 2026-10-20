@@ -1,0 +1,30 @@
+/* Users page: people with their roles per server, and the roles as a table of permissions */
+.toolbar .grow { flex: 1; min-width: 200px; margin: 0; }
+table.users tr.dim td { opacity: .6; }
+.user-tag { margin-left: 8px; }
+.grants { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.grant { white-space: nowrap; }
+
+table.roles .perm-col { text-align: center; white-space: nowrap; font-size: 12px; }
+table.roles th.perm-col { color: var(--muted); font-weight: 500; }
+.perm-yes { color: var(--ok); font-weight: 700; }
+.perm-no { color: var(--muted); }
+
+/* the user form: a role per server */
+.form-section { margin: 14px 0 4px; font-size: 14px; }
+.access-grid { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(160px, 220px); gap: 6px 12px; align-items: center; max-height: 46vh; overflow-y: auto; padding-right: 4px; }
+.grant-row { display: contents; }
+.grant-row .grant-server { margin: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grant-row select { width: 100%; }
+.grant-row .grant-perms { grid-column: 1 / -1; margin: -4px 0 4px; }
+.grant-row .grant-perms:empty { display: none; }
+
+/* the role form: a permission per line, with what it means */
+.perm-list { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
+.perm-option { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-size: 13px; color: var(--text); }
+.perm-option input { margin-top: 3px; }
+
+@media (max-width: 800px) {
+  .access-grid { grid-template-columns: 1fr; max-height: none; }
+  .grant-row .grant-server { margin-top: 6px; }
+}

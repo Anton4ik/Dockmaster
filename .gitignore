@@ -1,0 +1,17 @@
+bin/
+obj/
+*.user
+.vs/
+/data/
+*.pfx
+src/Dockmaster.Server/Data/keys/
+*.db
+*.db-*
+publish/
+.env
+node_modules/
+src/Dockmaster.Server/wwwroot/
+
+# Claude Code: agent worktrees and the local test-server launch config (.claude/launch.json)
+.claude/
+it-out/

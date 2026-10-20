@@ -1,0 +1,56 @@
+/* What sits over the page: menus and popovers, the side drawer, modals, notices in the corner. */
+.popover { position: absolute; left: 0; top: 100%; margin-top: 4px; z-index: 40; display: flex; flex-direction: column; gap: 2px; min-width: 140px; max-height: 260px; overflow: auto; padding: 8px 10px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 8px 20px rgba(0,0,0,.45); white-space: nowrap; font-size: 12px; color: var(--text); }
+.menu { position: relative; display: inline-block; }
+.menu-btn { padding: 0 8px; font-weight: 700; letter-spacing: 1px; }
+/* beside the project's full-size buttons the "⋯" is as tall as they are */
+.project-toolbar > .menu > .menu-btn { padding: 6px 10px; font-size: 13px; }
+.menu-list { position: absolute; right: 0; top: 100%; margin-top: 2px; min-width: 120px; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 8px 20px rgba(0,0,0,.4); z-index: 30; display: flex; flex-direction: column; padding: 4px; }
+.menu-list button { background: none; border: none; text-align: left; padding: 6px 10px; border-radius: 4px; }
+.menu-list button:hover { background: var(--panel); }
+/* a menu with room for a few lines and buttons (unchecked images) */
+.menu-list.wide { left: 0; right: auto; min-width: 360px; padding: 10px 12px; gap: 10px; }
+.unchecked { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.menu-list.wide .actions button { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; }
+.menu-list.wide .actions button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+
+/* side drawer: deploy progress or a container's log */
+pre.log { background: var(--log-bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12px; line-height: 1.4; max-height: 70vh; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(960px, 55vw); background: var(--panel); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0,0,0,.4); display: flex; flex-direction: column; z-index: 20; }
+/* a hidden task drawer: the task goes on, this brings its log back */
+.task-chip { position: fixed; right: 16px; bottom: 16px; z-index: 20; display: inline-flex; align-items: center; gap: 6px; max-width: min(420px, calc(100vw - 32px)); padding: 8px 14px; border-radius: 18px; background: var(--panel2); border: 1px solid var(--border); box-shadow: 0 6px 20px rgb(0 0 0 / .35); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.drawer header { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.drawer header h2 { margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drawer pre.log { flex: 1; max-height: none; border: none; border-radius: 0; }
+pre.log b.ok { color: var(--ok); }
+@media (max-width: 800px) {
+  .drawer { width: 100vw; }
+}
+
+/* notices in the corner */
+.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 60; display: flex; flex-direction: column; gap: 8px; max-width: min(420px, calc(100vw - 32px)); }
+.toast { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.5); font-size: 13px; animation: toast-in .15s ease-out; }
+.toast .dot { margin: 5px 0 0; flex-shrink: 0; }
+.toast.ok { border-left: 3px solid var(--ok); }
+.toast.error { border-left: 3px solid var(--bad); }
+.toast.busy { border-left: 3px solid var(--accent); }
+.toast-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.toast button.icon { flex-shrink: 0; background: none; border: none; color: var(--muted); }
+.toast button.icon:hover { color: var(--text); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
+@media (max-width: 800px) { .toasts { left: 12px; right: 12px; bottom: 12px; max-width: none; } }
+
+/* modal */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: flex-start; justify-content: center; padding: min(10vh, 64px) 16px 16px; z-index: 50; }
+/* a long form scrolls inside the screen, its buttons stay in sight at the bottom */
+.modal { width: min(560px, 100%); max-width: none; box-shadow: 0 20px 60px rgba(0,0,0,.6); max-height: calc(100dvh - min(10vh, 64px) - 16px); overflow-y: auto; overscroll-behavior: contain; }
+.modal > .form-actions.flush { position: sticky; bottom: -16px; margin: 16px -16px -16px; padding: 12px 16px; background: var(--panel); border-top: 1px solid var(--border); z-index: 1; }
+@media (max-width: 800px) { .modal-backdrop { padding: 8px; } .modal { max-height: calc(100dvh - 16px); } }
+.modal.wide { width: min(860px, 100%); }
+
+/* what changed between two versions of a file */
+pre.diff { background: var(--log-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 0; font-family: var(--mono); font-size: 12px; line-height: 1.45; max-height: 50vh; overflow: auto; margin: 6px 0 12px; }
+pre.diff > div { padding: 0 12px; white-space: pre; }
+.diff-mark { display: inline-block; width: 16px; color: var(--muted); user-select: none; }
+.diff-old { background: var(--bad-soft); } .diff-old .diff-mark { color: var(--bad); }
+.diff-new { background: var(--ok-soft); } .diff-new .diff-mark { color: var(--ok); }
+.diff-gap { color: var(--muted); font-style: italic; padding: 2px 12px; }

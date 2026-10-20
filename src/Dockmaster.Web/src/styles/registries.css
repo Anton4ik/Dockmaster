@@ -1,0 +1,23 @@
+/* registry browser: repositories on the left, the tags of the chosen one on the right */
+.browser { margin-top: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.browser-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.browser-head h2 { margin: 0; white-space: nowrap; }
+.browser-head input[type=search] { width: 280px; }
+.browser-body { display: grid; grid-template-columns: minmax(220px, 320px) 1fr; height: min(62vh, 640px); }
+.repo-list { overflow: auto; border-right: 1px solid var(--border); padding: 6px 0; }
+.repo-list .ns { padding: 10px 14px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+button.repo { display: block; width: 100%; text-align: left; background: none; border: none; border-radius: 0; padding: 6px 14px 6px 22px; color: var(--text); font-size: 13px; }
+button.repo:hover { background: var(--panel2); }
+button.repo.active { background: var(--accent-soft); color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.tag-list { overflow: auto; padding: 10px 14px; }
+.tag-list .tag-head { margin-bottom: 8px; }
+.tag-list table { background: none; }
+.tag-list td { padding: 6px 8px; }
+@media (max-width: 800px) {
+  .browser-body { grid-template-columns: 1fr; height: auto; }
+  .repo-list { max-height: 40vh; border-right: none; border-bottom: 1px solid var(--border); }
+  .browser-head { flex-wrap: wrap; }
+  .browser-head h2 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .browser-head .spacer { display: none; }
+  .browser-head input[type=search] { width: 100%; order: 2; }
+}

@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+**/node_modules/
+src/Dockmaster.Server/wwwroot/
+data/
+.git/
+.vs/
+*.db
+*.db-*
+publish/
+.claude/
+docs/
+.github/

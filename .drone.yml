@@ -1,0 +1,76 @@
+# Private CI (Drone): builds both images and pushes them to a private registry (secrets docker_registry, docker_username,
+# docker_password). The public images come from GitHub Actions (.github/workflows/build.yml) on ghcr.io.
+kind: pipeline
+type: docker
+name: dockmaster
+
+clone:
+  depth: 20
+  single_branch: true
+  timeout: 10m
+
+steps:
+- name: dockmaster-server
+  image: docker:24-cli
+  volumes:
+  - name: dockersock
+    path: /var/run/docker.sock
+  environment:
+    DOCKER_BUILDKIT: "1"
+    REGISTRY:
+      from_secret: docker_registry
+    GIT_USERNAME:
+      from_secret: docker_username
+    GIT_PASSWORD:
+      from_secret: docker_password
+  commands:
+  - echo $GIT_PASSWORD | docker login $REGISTRY -u $GIT_USERNAME --password-stdin
+  - docker pull $REGISTRY/dockmaster/dockmaster-server:latest || true
+  - >
+    docker build
+    --build-arg BUILDKIT_INLINE_CACHE=1
+    --build-arg DOCKMASTER_VERSION=${DRONE_COMMIT_SHA:0:8}
+    --cache-from $REGISTRY/dockmaster/dockmaster-server:latest
+    -t $REGISTRY/dockmaster/dockmaster-server:latest
+    -t $REGISTRY/dockmaster/dockmaster-server:${DRONE_COMMIT_SHA:0:8}
+    -f src/Dockmaster.Server/Dockerfile .
+  - docker push $REGISTRY/dockmaster/dockmaster-server:latest
+  - docker push $REGISTRY/dockmaster/dockmaster-server:${DRONE_COMMIT_SHA:0:8}
+
+- name: dockmaster-agent
+  image: docker:24-cli
+  volumes:
+  - name: dockersock
+    path: /var/run/docker.sock
+  environment:
+    DOCKER_BUILDKIT: "1"
+    REGISTRY:
+      from_secret: docker_registry
+    GIT_USERNAME:
+      from_secret: docker_username
+    GIT_PASSWORD:
+      from_secret: docker_password
+  commands:
+  - echo $GIT_PASSWORD | docker login $REGISTRY -u $GIT_USERNAME --password-stdin
+  - docker pull $REGISTRY/dockmaster/dockmaster-agent:latest || true
+  - >
+    docker build
+    --build-arg BUILDKIT_INLINE_CACHE=1
+    --build-arg DOCKMASTER_VERSION=${DRONE_COMMIT_SHA:0:8}
+    --cache-from $REGISTRY/dockmaster/dockmaster-agent:latest
+    -t $REGISTRY/dockmaster/dockmaster-agent:latest
+    -t $REGISTRY/dockmaster/dockmaster-agent:${DRONE_COMMIT_SHA:0:8}
+    -f src/Dockmaster.Agent/Dockerfile .
+  - docker push $REGISTRY/dockmaster/dockmaster-agent:latest
+  - docker push $REGISTRY/dockmaster/dockmaster-agent:${DRONE_COMMIT_SHA:0:8}
+
+volumes:
+- name: dockersock
+  host:
+    path: /var/run/docker.sock
+
+trigger:
+  event:
+    exclude:
+    - promote
+    - rollback

@@ -1,0 +1,29 @@
+/* code editor (Prism under a transparent textarea) */
+:root { --svc: #4ade80; }
+.code-editor { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow: auto; }
+.code-editor:focus-within { border-color: var(--accent); }
+.compose-head { margin: 12px 0 0; }
+/* the services of a compose file: one row, scrolled sideways when long, kept in view while the file scrolls */
+.service-bar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 6px; margin: 6px 0 0; padding: 6px 0; background: var(--bg);
+  overflow-x: auto; scrollbar-width: thin; }
+.service-bar > * { flex-shrink: 0; }
+.service-bar .chip { font-family: var(--mono); color: var(--text); }
+.service-bar .chip.on { border-color: var(--svc); color: var(--svc); background: rgba(74,222,128,.1); }
+@media (max-width: 800px) { .service-bar { top: var(--phone-bar, 49px); } }
+.code-editor-bar { display: flex; justify-content: flex-end; margin: 2px 0 4px; }
+/* one line each: the editor grows sideways and scrolls */
+.code-editor.nowrap > div { width: max-content; min-width: 100%; }
+.code-editor.nowrap .code-editor-textarea, .code-editor.nowrap .code-editor-pre { white-space: pre !important; overflow-wrap: normal !important; word-break: normal !important; }
+.code-editor-textarea { outline: none !important; }
+.code-editor-pre .token.key, .code-editor-pre .token.atrule, .code-editor-pre .token.attr-name { color: #7dd3fc; }
+/* a compose file: its sections and the names of its services are what the eye looks for in a long file. Colour and
+   a tint only — a bolder face could be wider than the transparent textarea's letters and misplace the caret */
+.code-editor-pre .token.section { color: #f472b6; }
+.code-editor-pre .token.service { color: var(--svc); background: rgba(74,222,128,.12); border-radius: 3px; }
+.code-editor-pre .token.service.flash { animation: svc-flash 1.2s ease-out; }
+@keyframes svc-flash { from { background: rgba(74,222,128,.45); } to { background: transparent; } }
+.code-editor-pre .token.string, .code-editor-pre .token.attr-value { color: #fbbf24; }
+.code-editor-pre .token.number, .code-editor-pre .token.boolean, .code-editor-pre .token.null { color: #c084fc; }
+.code-editor-pre .token.comment { color: #6b7a8c; font-style: italic; }
+.code-editor-pre .token.punctuation { color: #8b98a8; }
+.code-editor-pre .token.important, .code-editor-pre .token.tag { color: #f472b6; }
