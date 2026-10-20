@@ -46,9 +46,11 @@ Then **Add server**: the page prints a `docker run` for the agent (token and cer
 Paste it on every machine you want to manage — that is all. Put a reverse proxy with TLS in front of port 8080;
 leave port 9443 alone (the agents pin its certificate).
 
-Images: `ghcr.io/anton4ik/dockmaster-server` and `ghcr.io/anton4ik/dockmaster-agent` (linux/amd64, built by
-GitHub Actions from `main`). Building them yourself: `docker build -f src/Dockmaster.Server/Dockerfile .` and the same
-for the agent; see [docs/reference.md](docs/reference.md) for every setting.
+Images: `ghcr.io/anton4ik/dockmaster-server` and `ghcr.io/anton4ik/dockmaster-agent`, built by GitHub Actions from
+`main` for linux/amd64 and linux/arm64 (Raspberry Pi, ARM NAS boxes, Apple-silicon Docker Desktop) — `docker pull`
+picks the right one. Building them yourself: `docker build -f src/Dockmaster.Server/Dockerfile .` and the same for the
+agent (the .NET code is cross-compiled, so `docker buildx build --platform linux/arm64` works from an x86 machine too);
+see [docs/reference.md](docs/reference.md) for every setting.
 
 ---
 
@@ -346,7 +348,7 @@ dotnet run --project src/Dockmaster.Server    # http://localhost:8080
 ```
 
 The agent is Linux-only (it needs docker.sock); the server runs anywhere .NET runs. CI (`.github/workflows/build.yml`)
-runs the tests and pushes both images to GHCR on every push to `main`.
+runs the tests and pushes both images to GHCR, for amd64 and arm64, on every push to `main`.
 
 [docs/reference.md](docs/reference.md) has the full description of every page, compose key, environment variable
 and API endpoint.

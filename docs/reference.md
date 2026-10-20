@@ -102,6 +102,18 @@ Both images are built by GitHub Actions on every push to `main` and published on
 * `ghcr.io/anton4ik/dockmaster-server:latest` (+ `:<commit>`)
 * `ghcr.io/anton4ik/dockmaster-agent:latest` (+ `:<commit>`)
 
+Every tag is a multi-arch manifest for **linux/amd64** and **linux/arm64**, so the same `docker run` works on an x86
+server, a Raspberry Pi 4/5, an ARM NAS or an Apple-silicon Docker Desktop. The Dockerfiles cross-compile the .NET
+code (and the UI) on the build host and only run the final alpine stage for the target platform, so building the
+images yourself for another architecture needs no emulated compiler, just `docker buildx`:
+
+```bash
+docker buildx build --platform linux/arm64 -f src/Dockmaster.Agent/Dockerfile -t dockmaster-agent:arm64 .
+```
+
+(An `apk add` step still runs under QEMU: `docker run --privileged --rm tonistiigi/binfmt --install arm64` once on a
+Linux host; Docker Desktop has it built in.)
+
 **Server** (NAS or any docker host):
 
 ```bash
