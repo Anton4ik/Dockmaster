@@ -1,0 +1,35 @@
+/* Time charts (LineChart), the metrics tab and event lists. */
+.chart { position: relative; min-width: 0; }
+.chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.chart-title { font-size: 12px; color: var(--text); }
+.chart-legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); }
+.chart-legend i, .chart-tip-row i { display: inline-block; width: 12px; height: 2px; border-radius: 1px; vertical-align: middle; margin-right: 5px; }
+.chart svg { display: block; overflow: visible; touch-action: pan-y; }
+.chart-grid { stroke: var(--border); stroke-width: 1; }
+.chart-mark { stroke: var(--muted); stroke-width: 1; opacity: .6; }
+.chart-cross { stroke: var(--muted); stroke-width: 1; }
+.chart-dot { stroke: var(--panel); stroke-width: 2; }
+.chart-tick { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.chart-tip { position: absolute; pointer-events: none; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; min-width: 110px; z-index: 5; }
+.chart-tip-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.chart-tip-row b { font-variant-numeric: tabular-nums; }
+.metrics-card { margin-bottom: 16px; }
+.replica-links { display: inline-flex; gap: 8px; align-items: baseline; }
+.chart-grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 1400px) { .chart-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 800px) { .chart-grid-4 { grid-template-columns: minmax(0, 1fr); } }
+.chart-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 1100px) { .chart-grid-3 { grid-template-columns: minmax(0, 1fr); } }
+
+.event-list { display: flex; flex-direction: column; }
+.event { display: grid; grid-template-columns: 36px 72px 80px 1fr; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.event:last-child { border-bottom: none; }
+.event .badge { justify-self: start; }
+.event-text { overflow-wrap: anywhere; }
+.event-user { display: inline-flex; align-items: center; gap: 3px; margin-right: 6px; font-weight: 600; white-space: nowrap; }
+.event-user svg { color: var(--muted); flex-shrink: 0; }
+.event-details pre.inline-out { max-height: 320px; margin-top: 4px; }
+@media (max-width: 800px) {
+  .event { grid-template-columns: 36px 72px 1fr; }
+  .event-kind { display: none; }
+}

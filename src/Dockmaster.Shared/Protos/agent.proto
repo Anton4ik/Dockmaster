@@ -1,0 +1,467 @@
+syntax = "proto3";
+option csharp_namespace = "Dockmaster.Protocol";
+package dockmaster;
+
+// Agent opens ONE outbound bidirectional stream to the server and keeps it open.
+// Server never connects to agents -> agent hosts need no inbound ports.
+service AgentHub {
+  rpc Connect (stream AgentMessage) returns (stream ServerMessage);
+}
+
+// ---------- agent -> server ----------
+message AgentMessage {
+  oneof body {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    CommandProgress progress = 3;   // streamed log lines while a command runs
+    CommandResult result = 4;       // final result of a command
+    LogChunk logs = 5;              // container log lines (tail / follow)
+    DataChunk data = 6;             // bytes of an ExportVolume
+    DataAck data_ack = 7;           // chunks of an ImportVolume written: the server may send as many more
+  }
+}
+
+message Hello {
+  string token = 1;            // enrollment / agent token
+  string agent_version = 2;
+  HostInfo host = 3;
+  bool data_acks = 4;          // acks the DataChunks it is sent, and waits for acks of its own when ExportVolume.acks says so
+  bool secret_variables = 5;   // the project's secrets are also ${VARIABLES} of its compose file
+}
+
+message HostInfo {
+  string hostname = 1;
+  string os = 2;
+  string arch = 3;
+  string docker_version = 4;
+  int32 cpus = 5;
+  int64 memory_total = 6;
+  string agent_ip = 7;         // primary IP as seen by the agent
+  bool no_cpu_limits = 8;      // kernel lacks the CFS quota (Synology): containers cannot get CPU limits
+}
+
+message Heartbeat {
+  HostStats host = 1;
+  repeated ContainerInfo containers = 2;
+  int64 unix_ms = 3;
+  MeshStatus mesh = 4;         // absent: the agent predates the mesh or has not joined it
+}
+
+// ---------- mesh (WireGuard between agent hosts, managed by the server) ----------
+
+// State of the dm0 interface on the host, refreshed by the agent every few seconds.
+message MeshStatus {
+  bool up = 1;
+  string backend = 2;                  // "kernel" | "wireguard-go" | ""
+  string public_key = 3;
+  string config_hash = 4;              // hash of the last MeshApply that was written, so the server knows what is in effect
+  int32 listen_port = 5;
+  string address = 6;                  // "10.77.0.3/16"
+  repeated MeshPeerStatus peers = 7;
+  repeated string host_ips = 8;        // IPv4 addresses of the host itself (seen from the host network namespace)
+  repeated string problems = 9;        // e.g. "no /dev/net/tun", "subnet overlaps 10.77.0.0/24 on eth1"
+  map<string, double> rtt_ms = 10;     // mesh ip → ping, for every address reachable from here (through a hub too); -1 = no reply
+  bool plain_routes = 11;              // the agent applies MeshApply.routes; older agents do not, so the server keeps their pairs in the tunnel
+  bool kernel_available = 12;          // the kernel's WireGuard module can be used on this host right now (matters when backend is wireguard-go)
+  string tcp_congestion = 13;          // the host's TCP congestion control ("bbr", "cubic"); "" from older sidecars
+}
+
+message MeshPeerStatus {
+  string public_key = 1;
+  string mesh_ip = 2;
+  string endpoint = 3;                 // "1.2.3.4:51821" as WireGuard sees it, "" before the first packet
+  int64 last_handshake_unix = 4;       // 0 = never
+  int64 rx = 5;
+  int64 tx = 6;
+  double rtt_ms = 7;                   // -1 = no ping reply
+}
+
+// Prepare the host for the mesh: keys, sidecar, port + subnet check. Nothing is routed yet.
+// Result payload is JSON {publicKey, backend, listenPort, hostIps[], problems[]}.
+message MeshJoin {
+  int32 listen_port = 1;
+  string subnet = 2;                   // the mesh subnet, to check the host for overlapping routes
+}
+
+message MeshPeer {
+  string name = 1;                     // the peer's server name, for logs and status
+  string public_key = 2;
+  string mesh_ip = 3;
+  string endpoint = 4;                 // "host:port"; empty when this side must wait for the peer to connect
+  repeated string allowed_ips = 5;     // the peer's /32 plus the /32s routed through it (hub)
+  int32 keepalive = 6;                 // persistent keepalive seconds, 0 = none
+}
+
+// The full desired WireGuard configuration of this host. Idempotent: applying the same config changes nothing.
+message MeshApply {
+  string address = 1;                  // "10.77.0.3/16"
+  int32 listen_port = 2;
+  string subnet = 3;
+  bool hub = 4;                        // forward traffic between peers (ip_forward + FORWARD dm0->dm0)
+  int32 mtu = 5;
+  string config_hash = 6;
+  repeated MeshPeer peers = 7;
+  repeated MeshForward forward = 8;    // hub only: which mesh addresses may reach each other through this host
+  repeated MeshRoute routes = 9;       // peers on the same LAN of a trusted network: reached by a plain route, outside the tunnel
+  repeated MeshFrontend balance = 10;  // balancers on this host for services whose replicas run on other hosts
+  bool tcp_tuning = 11;                // set the host's TCP sysctls for long paths (BBR, bigger socket buffers); off puts them back
+}
+
+// A TCP balancer in the sidecar: a service port on this host's mesh address, spread over the service's replicas.
+message MeshFrontend {
+  string name = 1;                     // "project_service_port": unique on the host
+  string bind = 2;                     // "10.77.0.3:5432"
+  repeated string backends = 3;        // "10.77.0.2:32768": each replica, where it is published on its host's mesh address
+}
+
+// A peer reached without WireGuard: its mesh address is routed through its address on the shared LAN, unencrypted.
+message MeshRoute {
+  string mesh_ip = 1;
+  string via = 2;                      // the peer's LAN address, on a subnet this host is on too
+}
+
+// One isolated network's members, for the hub's forwarding rules: traffic passes only between addresses of the same
+// network, so a hub shared by two networks does not bridge them.
+message MeshForward {
+  string network = 1;
+  repeated string ips = 2;
+}
+
+// Tear the interface down, remove the sidecar and the keys.
+message MeshLeave {}
+
+// Measure the largest packet the path to each peer carries (ping with Don't-Fragment to its endpoint); the result
+// payload is JSON [{publicKey, host, mtu}], mtu 0 = not measurable. The server sets each host's tunnel MTU from it.
+message MeshTune {}
+
+// One side of an iperf3 run between two hosts: the server side listens once on its mesh ip, the client side
+// connects and returns iperf3's JSON in the result payload.
+message MeshBench {
+  bool server = 1;
+  string ip = 2;
+  int32 seconds = 3;
+  bool reverse = 4;                    // client side: the server sends, the client receives (iperf3 -R)
+}
+
+message HostStats {
+  double cpu_percent = 1;
+  int64 memory_used = 2;
+  int64 memory_total = 3;
+  int64 disk_used = 4;         // docker data root fs
+  int64 disk_total = 5;
+  double load1 = 6;
+  int64 uptime_seconds = 7;
+}
+
+message ContainerInfo {
+  string id = 1;
+  string name = 2;
+  string image = 3;
+  string state = 4;            // running / exited / restarting ...
+  string health = 5;           // healthy / unhealthy / starting / "" (no check)
+  string status = 6;           // human readable "Up 3 hours (healthy)"
+  int64 created_unix = 7;
+  int32 restart_count = 8;
+  string project = 9;          // com.docker.compose.project
+  string service = 10;         // com.docker.compose.service
+  double cpu_percent = 11;
+  int64 memory_usage = 12;
+  int64 memory_limit = 13;
+  double cpu_limit = 14;       // NanoCpus / 1e9, 0 = unlimited
+  int64 net_rx = 15;
+  int64 net_tx = 16;
+  repeated string ports = 17;  // "8080->80/tcp" when published, else "80/tcp"
+  int64 started_unix = 18;
+  string image_ref = 19;                // image as referenced when the container was created (Config.Image)
+  repeated string repo_digests = 20;    // repo@sha256:... of the container's image
+  bool newer_image_local = 21;          // image_ref now points to a different local image (pulled, not redeployed)
+  string restart_policy = 22;           // no / always / unless-stopped / on-failure
+  int32 restart_max = 23;               // on-failure: the most restarts Docker makes, 0 = no limit
+  int32 exit_code = 24;                 // of the last run, for a stopped container
+  bool oom_killed = 25;                 // the last run ended because it ran out of memory (exit code 137 too)
+  ContainerExit last_exit = 26;         // how its last run ended, also once it runs again; absent: not seen since the agent started
+  int64 memory_peak = 27;               // the most memory it held since it started, as the kernel counts it (page cache too); 0 = unknown
+}
+
+// How a run of a container ended, from docker's die event: docker itself forgets the exit code once it runs again.
+message ContainerExit {
+  int64 unix_ms = 1;
+  int32 exit_code = 2;
+  bool oom = 3;                          // docker reported it out of memory just before
+  string log_tail = 4;                   // its last lines before it ended; only while the exit is recent
+}
+
+message CommandProgress {
+  string command_id = 1;
+  string line = 2;
+}
+
+message CommandResult {
+  string command_id = 1;
+  bool ok = 2;
+  string message = 3;
+  string payload = 4;          // optional JSON payload (e.g. logs, compose config)
+}
+
+message LogChunk {
+  string command_id = 1;
+  string container_id = 2;
+  string text = 3;
+  bool eof = 4;
+}
+
+// ---------- server -> agent ----------
+message ServerMessage {
+  oneof body {
+    Welcome welcome = 1;
+    Command command = 2;
+    CancelCommand cancel = 3;
+    ExecInput exec_input = 4;       // keys / window size for a running StartExec
+    DataChunk data = 5;             // bytes for a running ImportVolume
+    DataAck data_ack = 6;           // chunks of an ExportVolume passed on: the agent may send as many more
+    Pace pace = 7;                  // how often to report from now on (agents before it keep Welcome.heartbeat_seconds)
+  }
+}
+
+// How often the agent reports. The server slows an agent down while nobody looks at it (its minutes are averaged
+// anyway) and speeds it up again when a page opens; the mesh status (a docker exec with pings) only needs to be fresh
+// while the Network page is open. A faster pace takes effect at once, a slower one after the current wait.
+message Pace {
+  int32 heartbeat_seconds = 1;
+  int32 mesh_seconds = 2;
+}
+
+// The server no longer waits for this command (log viewer closed, request timed out): stop it.
+message CancelCommand {
+  string command_id = 1;
+}
+
+message Welcome {
+  string agent_id = 1;
+  string agent_name = 2;
+  int32 heartbeat_seconds = 3;
+}
+
+message RegistryCredential {
+  string server = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message Command {
+  string id = 1;
+  oneof body {
+    DeployProject deploy = 10;
+    ProjectAction project_action = 11;
+    ContainerAction container_action = 12;
+    ContainerLogs container_logs = 13;
+    Ping ping = 14;
+    ImportProject import_project = 15;
+    ContainerUpdate container_update = 16;
+    SelfUpdate self_update = 17;
+    RecreateContainer recreate_container = 18;
+    PruneImages prune_images = 19;
+    ListImages list_images = 20;
+    RemoveImages remove_images = 21;
+    MeshJoin mesh_join = 22;
+    MeshApply mesh_apply = 23;
+    MeshLeave mesh_leave = 24;
+    MeshBench mesh_bench = 25;
+    InspectContainer inspect_container = 26;
+    ContainerNetwork container_network = 27;
+    ListNetworks list_networks = 28;
+    ContainerRestartPolicy container_restart_policy = 29;
+    ListVolumes list_volumes = 30;
+    CreateVolume create_volume = 31;
+    RemoveVolumes remove_volumes = 32;
+    CreateNetwork create_network = 33;
+    RemoveNetworks remove_networks = 34;
+    StartExec start_exec = 35;
+    ExportVolume export_volume = 36;
+    ImportVolume import_volume = 37;
+    BrowseVolume browse_volume = 38;
+    MeshTune mesh_tune = 39;
+  }
+}
+
+message DeployProject {
+  string project = 1;                    // compose project name
+  string compose_yaml = 2;
+  string env_file = 3;                   // contents of .env
+  repeated RegistryCredential registries = 4;
+  repeated string services = 5;          // empty = all services
+  bool pull = 6;
+  bool force_recreate = 7;
+  int32 health_timeout_seconds = 8;      // default 180
+  map<string, string> secrets = 9;       // name -> value; written to files and declared for compose
+  map<string, string> files = 10;        // the project's files (nginx.conf…): name -> content, written to <project>/files/
+}
+
+enum ProjectOp { PROJECT_START = 0; PROJECT_STOP = 1; PROJECT_RESTART = 2; PROJECT_DOWN = 3; }
+message ProjectAction {
+  string project = 1;
+  ProjectOp op = 2;
+  repeated string services = 3;          // empty = all
+}
+
+enum ContainerOp { CONTAINER_START = 0; CONTAINER_STOP = 1; CONTAINER_RESTART = 2; CONTAINER_REMOVE = 3; CONTAINER_KILL = 4; }
+message ContainerAction {
+  string container_id = 1;
+  ContainerOp op = 2;
+}
+
+message ContainerLogs {
+  string container_id = 1;
+  int32 tail = 2;
+  bool follow = 3;
+  string since = 4;
+}
+
+message Ping {}
+
+// Pull the agent's own image and replace the agent container with it.
+message SelfUpdate {}
+
+// Remove images no container uses: only untagged leftovers of older versions, or every unused image.
+message PruneImages {
+  bool all_unused = 1;
+}
+
+// All images with size and the containers using them; the result payload is JSON.
+message ListImages {}
+
+// Everything about one container (by id or name) for its page: config, env, state, health log, networks, mounts.
+// The result payload is JSON.
+message InspectContainer {
+  string container = 1;
+}
+
+// Connect a running or stopped container to a network (created as a bridge network when it does not exist) or
+// disconnect it, live: docker network connect / disconnect.
+message ContainerNetwork {
+  string container = 1;                  // id or name
+  string network = 2;
+  bool connect = 3;                      // false = disconnect
+}
+
+// The host's docker networks for pickers; the result payload is JSON.
+message ListNetworks {}
+
+// Docker volumes on the host with the containers using each; the result payload is JSON
+// {volumes: [...], images: {ref: [paths]}}.
+message ListVolumes {
+  bool sizes = 1;                        // also the size of each (reads every volume on the disk: can take a while)
+  repeated string images = 2;            // also the paths these images keep data in (their VOLUME), for the ones on the host
+}
+
+// Create a volume: local (docker keeps it on this host) or a share of another machine (driver options of the local
+// driver: type=nfs / cifs, o=..., device=...).
+message CreateVolume {
+  string name = 1;
+  map<string, string> options = 2;
+  map<string, string> labels = 3;
+}
+
+// Remove these volumes (names); volumes a container uses, even a stopped one, are refused. The result payload is JSON.
+message RemoveVolumes {
+  repeated string names = 1;
+}
+
+// A bridge network on this host, e.g. for services of several projects to reach each other by name.
+message CreateNetwork {
+  string name = 1;
+  bool internal = 2;                     // no way out to the internet: only the containers on it talk to each other
+}
+
+// Remove these networks (names); networks a container is connected to, and docker's own, are refused. The result
+// payload is JSON.
+message RemoveNetworks {
+  repeated string names = 1;
+}
+
+// A shell (or a command) in a container with a TTY, for the browser's terminal. Its output comes as LogChunk messages
+// of this command; input and window sizes as ExecInput. Ends when the shell exits or the command is cancelled.
+message StartExec {
+  string container = 1;
+  repeated string command = 2;           // empty: bash if the image has it, sh otherwise
+  int32 cols = 3;
+  int32 rows = 4;
+}
+
+// Keys typed into a running StartExec (session = its command id), a new window size, or closing it.
+message ExecInput {
+  string session = 1;
+  bytes data = 2;
+  int32 cols = 3;                        // 0 = size unchanged
+  int32 rows = 4;
+  bool close = 5;
+}
+
+// Bytes of a transfer: from the agent for an ExportVolume, to the agent for an ImportVolume (command_id = that command).
+message DataChunk {
+  string command_id = 1;
+  bytes data = 2;
+  bool eof = 3;                          // to the agent: nothing more comes
+}
+
+// The receiver of DataChunks has passed this many of a command's on (written to the volume, the download or the other
+// agent): the sender keeps a window of chunks not acked yet and waits when it is full, so a big volume never piles up
+// in memory on the way.
+message DataAck {
+  string command_id = 1;
+  int32 chunks = 2;
+}
+
+// A volume (or a folder or one file in it) as a stream of DataChunk: a tar.gz of the folder, or the file as it is.
+message ExportVolume {
+  string volume = 1;
+  string path = 2;                       // inside the volume, "" = all of it
+  bool file = 3;                         // path is one file: its bytes, no archive
+  bool acks = 4;                         // the server acks the chunks: wait for them (older servers do not)
+}
+
+// A tar.gz arriving as DataChunk messages unpacked into a volume (created when missing). The archive is unpacked
+// aside first: a broken or cut off one leaves the volume as it was.
+message ImportVolume {
+  string volume = 1;
+  bool wipe = 2;                         // replace what is in the volume
+}
+
+// The entries of a folder in a volume; the result payload is JSON.
+message BrowseVolume {
+  string volume = 1;
+  string path = 2;
+}
+
+// Remove these images (ids); images a container uses are refused. The result payload is JSON.
+message RemoveImages {
+  repeated string ids = 1;
+}
+
+// Pull the image of a container outside Dockmaster projects and re-create it with the same configuration.
+message RecreateContainer {
+  string container_id = 1;
+  bool pull = 2;
+  bool force = 3;                          // re-create even when the image did not change
+  repeated RegistryCredential registries = 4;
+}
+
+// Change resource limits of a running container in place (docker update). 0 = leave unchanged.
+message ContainerUpdate {
+  string container_id = 1;
+  int64 memory = 2;        // bytes
+  double cpus = 3;         // cores
+}
+
+// Change the restart policy of a container in place (docker update --restart), running or not.
+message ContainerRestartPolicy {
+  string container_id = 1;
+  string policy = 2;       // no | always | unless-stopped | on-failure
+  int32 max_retries = 3;   // on-failure only; 0 = no limit
+}
+
+// Read the compose files of a project started outside Dockmaster; the result payload is JSON
+// {compose, env, source, configFiles[], warnings[]} (source: how the compose file was found).
+message ImportProject {
+  string project = 1;
+}
